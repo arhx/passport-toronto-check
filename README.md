@@ -20,19 +20,22 @@ npx playwright install chromium
 
 ## Настройка
 
-В `refresh.mjs` задаются константы:
+Скопируй файл конфигурации и заполни своими значениями:
 
-| Константа | Описание |
-|---|---|
-| `ANTI_CAPTCHA_KEY` | API-ключ от [anti-captcha.com](https://anti-captcha.com) |
-| `HEADLESS` | `true` — браузер скрытый, `false` — показывать окно браузера |
+```bash
+cp config.example.mjs config.mjs
+```
 
-В `check.mjs`:
+Отредактируй `config.mjs`:
 
-| Константа | Описание |
-|---|---|
-| `TG_TOKEN` | Токен Telegram-бота |
-| `TG_CHAT` | ID чата/канала для уведомлений |
+```js
+export const TG_TOKEN         = 'YOUR_TELEGRAM_BOT_TOKEN';   // токен бота от @BotFather
+export const TG_CHAT          = 'YOUR_TELEGRAM_CHAT_ID';     // ID чата или канала
+export const ANTI_CAPTCHA_KEY = 'YOUR_ANTICAPTCHA_KEY';      // ключ с anti-captcha.com
+export const HEADLESS         = true;  // false — показывать окно браузера
+```
+
+> `config.mjs` добавлен в `.gitignore` и не попадает в репозиторий.
 
 ## Запуск
 
@@ -64,6 +67,8 @@ node sound.mjs
 ## Первый запуск
 
 При первом запуске (или когда куки протухли) скрипт автоматически откроет браузер, пройдёт CF-challenge через anti-captcha и сохранит `cf_clearance` в `cookies.txt`.
+
+Чтобы наблюдать за процессом — поставь `HEADLESS = false` в `config.mjs`.
 
 ## Требования
 
