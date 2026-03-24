@@ -10,6 +10,7 @@
 
 import https from 'https';
 import zlib from 'zlib';
+import fs from 'fs';
 import { playAlert } from './sound.mjs';
 import { TG_TOKEN, TG_CHAT } from './config.mjs';
 
@@ -32,7 +33,8 @@ function lookup(hostname, options, callback) {
 // ─── Состояния ────────────────────────────────────────────────────────────────
 
 const STATE = {
-    NO_FORM:         'NO_FORM',         // нет формы, текст "всі місця зайняті"
+    NO_FORM:         'NO_FORM',         // сервис недоступен / VPN-блок
+    ALL_TAKEN:       'ALL_TAKEN',       // форма отсутствует — все места заняты
     FORM_NO_SLOTS:   'FORM_NO_SLOTS',   // форма есть, но days === false
     SLOTS_AVAILABLE: 'SLOTS_AVAILABLE', // есть свободные даты
 };
@@ -79,7 +81,9 @@ const HEADER = `📋 <b>passport-toronto-check</b>`;
 function stateMessage(state, now, data) {
     switch (state) {
         case STATE.NO_FORM:
-            return `${HEADER}\n\n❌ <b>Форми немає</b> — всі місця зайняті (текст на сторінці)\n\n🕐 Актуально: ${now}`;
+            return `${HEADER}\n\n🚫 <b>Сервіс недоступний</b> (VPN-блок або помилка сервера)\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
+        case STATE.ALL_TAKEN:
+            return `${HEADER}\n\n❌ <b>Усі місця зайняті</b> — форми запису немає\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
         case STATE.FORM_NO_SLOTS:
             return `${HEADER}\n\n⚠️ <b>Форма є</b>, але місць немає (<code>days: false</code>)\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
         case STATE.SLOTS_AVAILABLE:
@@ -158,17 +162,30 @@ async function check() {
         }
     });
 
+    // Всегда сохраняем HTML для отладки
+    fs.writeFileSync('./debug_page.html', page.body);
+    console.log('[debug] HTML сторінки збережено у debug_page.html');
+
     if (page.status !== 200) {
         console.error(`[error] Сервер відповів ${page.status}`);
+        console.error(`[debug] Set-Cookie: ${JSON.stringify(page.setCookies)}`);
+        console.error(`[debug] Тіло відповіді (перші 500):\n${page.body.slice(0, 500)}`);
         return false;
     }
 
     const now = new Date().toLocaleString('uk-UA', { timeZone: 'America/Toronto' }) + ' (Toronto)';
 
-    // Случай 1: форма отсутствует — места закончились (текст на странице)
-    if (page.body.includes('На разі всі місця зайняті')) {
-        console.log(`[${now}] → Місць немає (текст на сторінці)`);
+    // Случай 0: сервис заблокировал наш IP как VPN
+    if (page.body.includes('Сервіс не доступний') || page.body.includes('VPN-сервіс')) {
+        console.warn(`[${now}] → Сервіс не доступний (IP заблоковано як VPN)`);
         await notifyState(STATE.NO_FORM, now, null);
+        return false;
+    }
+
+    // Случай 1: форма отсутствует — места закончились (текст на странице)
+    if (page.body.includes('На разі всі місця зайняті') || page.body.includes('всі місця зайняті')) {
+        console.log(`[${now}] → Місць немає (текст на сторінці)`);
+        await notifyState(STATE.ALL_TAKEN, now, null);
         return false;
     }
 
@@ -176,7 +193,54 @@ async function check() {
     const csrfMatch = page.body.match(/csrf:\s*['"]([a-f0-9]{32})['"]/);
     if (!csrfMatch) {
         console.error('[error] CSRF не знайдено і тексту "всі місця зайняті" немає — невідомий стан сторінки.');
-        console.error(page.body.slice(0, 300));
+        // Диагностика: что именно вернул сервер
+        const isCloudflare = page.body.includes('cloudflare') || page.body.includes('Cloudflare') || page.body.includes('cf-ray');
+        const isCaptcha    = page.body.includes('captcha') || page.body.includes('Captcha') || page.body.includes('turnstile');
+        const isChallenge  = page.body.includes('challenge') || page.body.includes('jschl');
+        const title        = page.body.match(/<title[^>]*>([^<]{0,120})<\/title>/i)?.[1]?.trim() ?? '(без заголовка)';
+        console.error(`[debug] HTTP статус: ${page.status}`);
+        console.error(`[debug] Заголовок сторінки: ${title}`);
+        console.error(`[debug] Cloudflare: ${isCloudflare}, Captcha: ${isCaptcha}, Challenge: ${isChallenge}`);
+        console.error(`[debug] Set-Cookie: ${JSON.stringify(page.setCookies)}`);
+        // Ищем любое упоминание csrf в странице
+        const csrfIdx = page.body.toLowerCase().indexOf('csrf');
+        if (csrfIdx === -1) {
+            console.error('[debug] Слово "csrf" на сторінці ВІДСУТНЄ взагалі');
+        } else {
+            console.error(`[debug] Контекст навколо "csrf" (pos ${csrfIdx}):\n${page.body.slice(Math.max(0, csrfIdx - 100), csrfIdx + 200)}`);
+        }
+        // Ищем наличие формы и её содержимое
+        const formIdx = page.body.toLowerCase().indexOf('<form');
+        if (formIdx !== -1) {
+            const formEnd = page.body.toLowerCase().indexOf('</form>', formIdx);
+            const formSnippet = formEnd !== -1
+                ? page.body.slice(formIdx, formEnd + 7)
+                : page.body.slice(formIdx, formIdx + 1000);
+            console.error(`[debug] Вміст <form>:\n${formSnippet}`);
+        } else {
+            console.error('[debug] Тег <form> ВІДСУТНІЙ');
+        }
+        // Ищем hidden input-ы (возможно токен передаётся иначе)
+        const hiddenMatches = [...page.body.matchAll(/<input[^>]+type=["']?hidden["']?[^>]*>/gi)];
+        console.error(`[debug] Hidden inputs (${hiddenMatches.length}):`);
+        hiddenMatches.forEach(m => console.error('  ' + m[0].slice(0, 200)));
+        // Ищем любые JS переменные с токеном (token, key, hash)
+        const jsTokens = [...page.body.matchAll(/(?:token|key|hash|secret)\s*[:=]\s*['"]([a-f0-9]{16,})['"]/gi)];
+        console.error(`[debug] JS-токени на сторінці (${jsTokens.length}):`);
+        jsTokens.forEach(m => console.error('  ' + m[0].slice(0, 200)));
+        // Ищем упоминания e-queue, check_services, ServiceCenter в скриптах
+        const keywords = ['check_services', 'ServiceCenter', 'e-queue', 'days', 'queue'];
+        for (const kw of keywords) {
+            const idx = page.body.indexOf(kw);
+            if (idx !== -1) {
+                console.error(`[debug] Знайдено "${kw}" (pos ${idx}):\n  ${page.body.slice(Math.max(0, idx-80), idx+150)}`);
+            } else {
+                console.error(`[debug] "${kw}" — не знайдено на сторінці`);
+            }
+        }
+        // Ищем подгружаемые JS-файлы (вдруг e-queue загружается отдельным скриптом)
+        const scripts = [...page.body.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map(m => m[1]);
+        console.error(`[debug] JS-файли (${scripts.length}): ${scripts.join(', ')}`);
         return false;
     }
     const csrf = csrfMatch[1];
@@ -216,7 +280,9 @@ async function check() {
     try {
         data = JSON.parse(post.body);
     } catch {
-        console.error('[error] Неочікувана відповідь POST:', post.body.slice(0, 200));
+        console.error(`[error] Неочікувана відповідь POST (HTTP ${post.status}):`);
+        console.error(`[debug] Set-Cookie: ${JSON.stringify(post.setCookies)}`);
+        console.error(`[debug] Тіло (перші 500):\n${post.body.slice(0, 500)}`);
         return false;
     }
 
