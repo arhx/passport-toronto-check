@@ -6,16 +6,18 @@
 
 ## Как работает
 
-1. Открывает сайт через Playwright
-2. Обходит Cloudflare Turnstile через [anti-captcha.com](https://anti-captcha.com)
-3. Делает POST-запрос к API сайта для проверки доступных дат
-4. При нахождении дат — играет звук и шлёт Telegram-сообщение
+1. Подключается напрямую к реальному IP сервера (`178.20.157.25`), минуя Cloudflare
+2. Делает GET-запрос к странице очереди
+3. Если страница содержит текст «На разі всі місця зайняті» — мест нет
+4. Если форма доступна — делает POST-запрос к API для проверки дат
+5. При нахождении дат — играет звук и шлёт Telegram-сообщение
+
+> Никаких браузеров, капчи и сторонних сервисов не требуется.
 
 ## Установка
 
 ```bash
 npm install
-npx playwright install chromium
 ```
 
 ## Настройка
@@ -29,10 +31,8 @@ cp config.example.mjs config.mjs
 Отредактируй `config.mjs`:
 
 ```js
-export const TG_TOKEN         = 'YOUR_TELEGRAM_BOT_TOKEN';   // токен бота от @BotFather
-export const TG_CHAT          = 'YOUR_TELEGRAM_CHAT_ID';     // ID чата или канала
-export const ANTI_CAPTCHA_KEY = 'YOUR_ANTICAPTCHA_KEY';      // ключ с anti-captcha.com
-export const HEADLESS         = true;  // false — показывать окно браузера
+export const TG_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN';  // токен бота от @BotFather
+export const TG_CHAT  = 'YOUR_TELEGRAM_CHAT_ID';    // ID чата или канала
 ```
 
 > `config.mjs` добавлен в `.gitignore` и не попадает в репозиторий.
@@ -54,24 +54,12 @@ node check.mjs --watch
 node check.mjs --watch 10
 ```
 
-### Только обновить cf_clearance (без проверки)
-```bash
-node refresh.mjs
-```
-
 ### Тест звукового оповещения
 ```bash
 node sound.mjs
 ```
 
-## Первый запуск
-
-При первом запуске (или когда куки протухли) скрипт автоматически откроет браузер, пройдёт CF-challenge через anti-captcha и сохранит `cf_clearance` в `cookies.txt`.
-
-Чтобы наблюдать за процессом — поставь `HEADLESS = false` в `config.mjs`.
-
 ## Требования
 
-- Node.js 18+
+- Node.js 20+
 - Windows (звук через PowerShell/Windows Media)
-- Аккаунт на [anti-captcha.com](https://anti-captcha.com) с балансом
