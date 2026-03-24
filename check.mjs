@@ -29,21 +29,79 @@ function lookup(hostname, options, callback) {
     }
 }
 
+// ─── Состояния ────────────────────────────────────────────────────────────────
+
+const STATE = {
+    NO_FORM:         'NO_FORM',         // нет формы, текст "всі місця зайняті"
+    FORM_NO_SLOTS:   'FORM_NO_SLOTS',   // форма есть, но days === false
+    SLOTS_AVAILABLE: 'SLOTS_AVAILABLE', // есть свободные даты
+};
+
+// Персистентная память состояния между итерациями мониторинга
+let lastState     = null;  // предыдущее состояние (null = неизвестно)
+let lastMessageId = null;  // ID последнего отправленного сообщения в Telegram
+
 // ─── Telegram ─────────────────────────────────────────────────────────────────
 
-function tgSend(text) {
-    const body = Buffer.from(JSON.stringify({ chat_id: TG_CHAT, text, parse_mode: 'HTML' }));
+function tgRequest(apiMethod, payload) {
+    const body = Buffer.from(JSON.stringify(payload));
     return new Promise((resolve) => {
         const r = https.request({
             hostname: 'api.telegram.org',
-            path: `/bot${TG_TOKEN}/sendMessage`,
+            path: `/bot${TG_TOKEN}/${apiMethod}`,
             method: 'POST',
             headers: { 'content-type': 'application/json', 'content-length': body.length },
-        }, res => { res.resume(); res.on('end', resolve); });
-        r.on('error', e => { console.error('[tg] Ошибка:', e.message); resolve(); });
+        }, res => {
+            const chunks = [];
+            res.on('data', c => chunks.push(c));
+            res.on('end', () => {
+                try { resolve(JSON.parse(Buffer.concat(chunks).toString())); }
+                catch { resolve(null); }
+            });
+        });
+        r.on('error', e => { console.error('[tg] Ошибка:', e.message); resolve(null); });
         r.write(body);
         r.end();
     });
+}
+
+async function tgSend(text) {
+    const res = await tgRequest('sendMessage', { chat_id: TG_CHAT, text, parse_mode: 'HTML' });
+    return res?.result?.message_id ?? null;
+}
+
+async function tgEdit(messageId, text) {
+    await tgRequest('editMessageText', { chat_id: TG_CHAT, message_id: messageId, text, parse_mode: 'HTML' });
+}
+
+const HEADER = `📋 <b>passport-toronto-check</b>`;
+
+function stateMessage(state, now, data) {
+    switch (state) {
+        case STATE.NO_FORM:
+            return `${HEADER}\n\n❌ <b>Форми немає</b> — всі місця зайняті (текст на сторінці)\n\n🕐 Актуально: ${now}`;
+        case STATE.FORM_NO_SLOTS:
+            return `${HEADER}\n\n⚠️ <b>Форма є</b>, але місць немає (<code>days: false</code>)\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
+        case STATE.SLOTS_AVAILABLE:
+            return `${HEADER}\n\n✅ <b>Є вільні дати!</b>\n\n🔗 ${TARGET}\n\n<pre>${JSON.stringify(data, null, 2)}</pre>\n\n🕐 Актуально: ${now}`;
+    }
+}
+
+async function notifyState(state, now, data) {
+    const text = stateMessage(state, now, data);
+    if (lastState === null || lastState !== state) {
+        // первый запуск или состояние изменилось — новое сообщение
+        const msgId = await tgSend(text);
+        lastState     = state;
+        lastMessageId = msgId;
+        console.log(`[tg] Новое сообщение (state=${state}), id=${msgId}`);
+    } else {
+        // состояние не изменилось — обновляем дату в существующем сообщении
+        if (lastMessageId) {
+            await tgEdit(lastMessageId, text);
+            console.log(`[tg] Обновлено сообщение id=${lastMessageId} (state=${state})`);
+        }
+    }
 }
 
 // ─── HTTP ─────────────────────────────────────────────────────────────────────
@@ -105,11 +163,12 @@ async function check() {
         return false;
     }
 
-    const now = new Date().toLocaleString('uk-UA', { timeZone: 'America/Toronto' });
+    const now = new Date().toLocaleString('uk-UA', { timeZone: 'America/Toronto' }) + ' (Toronto)';
 
     // Случай 1: форма отсутствует — места закончились (текст на странице)
     if (page.body.includes('На разі всі місця зайняті')) {
         console.log(`[${now}] → Місць немає (текст на сторінці)`);
+        await notifyState(STATE.NO_FORM, now, null);
         return false;
     }
 
@@ -165,13 +224,13 @@ async function check() {
 
     if (data.days === false) {
         console.log('→ Місць немає');
+        await notifyState(STATE.FORM_NO_SLOTS, now, null);
         return false;
     }
 
     console.log('→ ✅ Є ВІЛЬНІ ДАТИ!');
     console.log(JSON.stringify(data, null, 2));
-    const msg = `✅ <b>Є вільні дати!</b>\n${now}\n\n<pre>${JSON.stringify(data, null, 2)}</pre>`;
-    await Promise.all([playAlert(), tgSend(msg)]);
+    await Promise.all([playAlert(), notifyState(STATE.SLOTS_AVAILABLE, now, data)]);
     return true;
 }
 
