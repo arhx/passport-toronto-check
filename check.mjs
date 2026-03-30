@@ -309,11 +309,18 @@ async function check() {
         console.error(`[error] Неочікувана відповідь POST (HTTP ${post.status}):`);
         console.error(`[debug] Set-Cookie: ${JSON.stringify(post.setCookies)}`);
         console.error(`[debug] Тіло (перші 500):\n${post.body.slice(0, 500)}`);
-        const snapFile = saveDebugSnapshot(post.body, `post_${post.status}`);
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const snapPage = `./debug_get_page_${stamp}.html`;
+        const snapPost = `./debug_post_${post.status}_${stamp}.html`;
+        fs.writeFileSync(snapPage, page.body);
+        fs.writeFileSync(snapPost, post.body);
+        console.log(`[debug] Snapshot GET: ${snapPage}`);
+        console.log(`[debug] Snapshot POST: ${snapPost}`);
         await notifyAlways(
             `${HEADER}\n\n🔴 <b>POST повернув не-JSON (HTTP ${post.status})</b>\n\n` +
             `Тіло відповіді: <code>${post.body.slice(0, 300).replace(/</g, '&lt;')}</code>\n\n` +
-            `Файл знімку: <code>${snapFile}</code>\n\n🔗 ${TARGET}\n\n🕐 ${now}`
+            `GET-сторінка (токен): <code>${snapPage}</code>\n` +
+            `POST-відповідь: <code>${snapPost}</code>\n\n🔗 ${TARGET}\n\n🕐 ${now}`
         );
         return false;
     }
