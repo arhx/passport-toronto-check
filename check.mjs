@@ -91,6 +91,21 @@ function stateMessage(state, now, data) {
     }
 }
 
+// Всегда новое сообщение — для аномальных состояний, не вписывающихся в State-машину
+async function notifyAlways(text) {
+    const msgId = await tgSend(text);
+    console.log(`[tg] Нове повідомлення (аномалія), id=${msgId}`);
+}
+
+// Сохранить снимок HTML/текста с меткой времени (только для нестандартных ситуаций)
+function saveDebugSnapshot(body, label) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `./debug_${label}_${stamp}.html`;
+    fs.writeFileSync(filename, body);
+    console.log(`[debug] Snapshot збережено: ${filename}`);
+    return filename;
+}
+
 async function notifyState(state, now, data) {
     const text = stateMessage(state, now, data);
     if (lastState === null || lastState !== state) {
@@ -167,9 +182,12 @@ async function check() {
     console.log('[debug] HTML сторінки збережено у debug_page.html');
 
     if (page.status !== 200) {
+        const now = new Date().toLocaleString('uk-UA', { timeZone: 'America/Toronto' }) + ' (Toronto)';
         console.error(`[error] Сервер відповів ${page.status}`);
         console.error(`[debug] Set-Cookie: ${JSON.stringify(page.setCookies)}`);
         console.error(`[debug] Тіло відповіді (перші 500):\n${page.body.slice(0, 500)}`);
+        const snapFile = saveDebugSnapshot(page.body, `get_${page.status}`);
+        await notifyAlways(`${HEADER}\n\n⚠️ <b>GET відповів HTTP ${page.status}</b> — несподіваний статус\n\nФайл знімку: <code>${snapFile}</code>\n\n🔗 ${TARGET}\n\n🕐 ${now}`);
         return false;
     }
 
@@ -241,6 +259,14 @@ async function check() {
         // Ищем подгружаемые JS-файлы (вдруг e-queue загружается отдельным скриптом)
         const scripts = [...page.body.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map(m => m[1]);
         console.error(`[debug] JS-файли (${scripts.length}): ${scripts.join(', ')}`);
+        const snapFile = saveDebugSnapshot(page.body, 'csrf_missing');
+        await notifyAlways(
+            `${HEADER}\n\n🔍 <b>CSRF не знайдено — незвичайна сторінка</b>\n\n` +
+            `Заголовок: <code>${title}</code>\n` +
+            `Cloudflare: ${isCloudflare} | Captcha: ${isCaptcha} | Challenge: ${isChallenge}\n` +
+            `Форма: ${formIdx !== -1 ? 'є' : 'ВІДСУТНЯ'} | csrf у HTML: ${csrfIdx !== -1 ? 'є' : 'ВІДСУТНІЙ'}\n\n` +
+            `Файл знімку: <code>${snapFile}</code>\n\n🔗 ${TARGET}\n\n🕐 ${now}`
+        );
         return false;
     }
     const csrf = csrfMatch[1];
@@ -283,6 +309,12 @@ async function check() {
         console.error(`[error] Неочікувана відповідь POST (HTTP ${post.status}):`);
         console.error(`[debug] Set-Cookie: ${JSON.stringify(post.setCookies)}`);
         console.error(`[debug] Тіло (перші 500):\n${post.body.slice(0, 500)}`);
+        const snapFile = saveDebugSnapshot(post.body, `post_${post.status}`);
+        await notifyAlways(
+            `${HEADER}\n\n🔴 <b>POST повернув не-JSON (HTTP ${post.status})</b>\n\n` +
+            `Тіло відповіді: <code>${post.body.slice(0, 300).replace(/</g, '&lt;')}</code>\n\n` +
+            `Файл знімку: <code>${snapFile}</code>\n\n🔗 ${TARGET}\n\n🕐 ${now}`
+        );
         return false;
     }
 
