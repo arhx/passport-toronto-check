@@ -1,2 +1,3 @@
-export const TG_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN';
-export const TG_CHAT  = 'YOUR_TELEGRAM_CHAT_ID';
+export const TG_TOKEN   = 'YOUR_TELEGRAM_BOT_TOKEN';
+export const TG_CHAT    = 'YOUR_TELEGRAM_CHAT_ID';
+export const TG_ENABLED = true;
