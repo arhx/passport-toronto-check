@@ -5,20 +5,24 @@
  * Запуск:
  *   node check.mjs              — одна проверка
  *   node check.mjs --watch      — мониторинг каждые 5 минут
- *   node check.mjs --watch 10   — мониторинг каждые 10 минут
+ *   node check.mjs --watch 1    — мониторинг каждую минуту
  */
 
 import https from 'https';
 import zlib from 'zlib';
+import crypto from 'crypto';
 import fs from 'fs';
 import { playAlert } from './sound.mjs';
-import { TG_TOKEN, TG_CHAT } from './config.mjs';
+import { TG_TOKEN, TG_CHAT, TG_ENABLED } from './config.mjs';
 
 const REAL_IP  = '178.20.157.25';
 const HOST     = 'toronto.pasport.org.ua';
 const PATH     = '/solutions/e-queue';
 const TARGET   = `https://${HOST}${PATH}`;
 const UA       = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
+
+// Имитация dpuniq (thumbmark browser fingerprint) — сервер требует эту куку на POST
+const DPUNIQ = crypto.randomBytes(16).toString('hex');
 
 // Всегда резолвим в реальный IP — обходим Cloudflare
 // Node.js 20+ (Happy Eyeballs) вызывает lookup с { all: true } и ожидает массив
@@ -36,6 +40,7 @@ const STATE = {
     NO_FORM:         'NO_FORM',         // сервис недоступен / VPN-блок
     ALL_TAKEN:       'ALL_TAKEN',       // форма отсутствует — все места заняты
     FORM_NO_SLOTS:   'FORM_NO_SLOTS',   // форма есть, но days === false
+    POST_ERROR:      'POST_ERROR',      // форма есть, но POST вернул ошибку (не JSON / помилка доступу)
     SLOTS_AVAILABLE: 'SLOTS_AVAILABLE', // есть свободные даты
 };
 
@@ -68,11 +73,13 @@ function tgRequest(apiMethod, payload) {
 }
 
 async function tgSend(text) {
+    if (!TG_ENABLED) { console.log('[tg off]', text.replace(/<[^>]+>/g, '')); return null; }
     const res = await tgRequest('sendMessage', { chat_id: TG_CHAT, text, parse_mode: 'HTML' });
     return res?.result?.message_id ?? null;
 }
 
 async function tgEdit(messageId, text) {
+    if (!TG_ENABLED) { console.log('[tg off] edit:', text.replace(/<[^>]+>/g, '')); return; }
     await tgRequest('editMessageText', { chat_id: TG_CHAT, message_id: messageId, text, parse_mode: 'HTML' });
 }
 
@@ -86,6 +93,8 @@ function stateMessage(state, now, data) {
             return `${HEADER}\n\n❌ <b>Усі місця зайняті</b> — форми запису немає\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
         case STATE.FORM_NO_SLOTS:
             return `${HEADER}\n\n⚠️ <b>Форма є</b>, але місць немає (<code>days: false</code>)\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
+        case STATE.POST_ERROR:
+            return `${HEADER}\n\n🔴 <b>Форма є, але POST повернув помилку</b>\n\n<code>${String(data).slice(0, 300)}</code>\n\n🔗 ${TARGET}\n\n🕐 Актуально: ${now}`;
         case STATE.SLOTS_AVAILABLE:
             return `${HEADER}\n\n✅ <b>Є вільні дати!</b>\n\n🔗 ${TARGET}\n\n<pre>${JSON.stringify(data, null, 2)}</pre>\n\n🕐 Актуально: ${now}`;
     }
@@ -106,20 +115,29 @@ function saveDebugSnapshot(body, label) {
     return filename;
 }
 
+// Тихие состояния (100% нет мест) — одно сообщение, обновляем время
+const QUIET_STATES = new Set([STATE.ALL_TAKEN, STATE.FORM_NO_SLOTS]);
+
 async function notifyState(state, now, data) {
     const text = stateMessage(state, now, data);
-    if (lastState === null || lastState !== state) {
-        // первый запуск или состояние изменилось — новое сообщение
-        const msgId = await tgSend(text);
-        lastState     = state;
-        lastMessageId = msgId;
-        console.log(`[tg] Новое сообщение (state=${state}), id=${msgId}`);
-    } else {
-        // состояние не изменилось — обновляем дату в существующем сообщении
-        if (lastMessageId) {
+
+    if (QUIET_STATES.has(state)) {
+        // Мест точно нет — не спамим, обновляем одно сообщение
+        if (lastState === null || lastState !== state) {
+            const msgId = await tgSend(text);
+            lastState     = state;
+            lastMessageId = msgId;
+            console.log(`[tg] Новое сообщение (state=${state}), id=${msgId}`);
+        } else if (lastMessageId) {
             await tgEdit(lastMessageId, text);
             console.log(`[tg] Обновлено сообщение id=${lastMessageId} (state=${state})`);
         }
+    } else {
+        // Всё остальное (POST_ERROR, SLOTS_AVAILABLE и т.д.) — спамим каждый раз
+        const msgId = await tgSend(text);
+        lastState     = state;
+        lastMessageId = msgId;
+        console.log(`[tg] Нове повідомлення (state=${state}), id=${msgId}`);
     }
 }
 
@@ -171,6 +189,7 @@ async function check() {
             'accept-encoding': 'gzip, deflate, br',
             'accept-language': 'uk,en-US;q=0.9,en;q=0.8,ru;q=0.7',
             'user-agent': UA,
+            'cookie': `dpuniq=${DPUNIQ}`,
             'sec-fetch-dest': 'document',
             'sec-fetch-mode': 'navigate',
             'sec-fetch-site': 'none',
@@ -271,7 +290,7 @@ async function check() {
     }
     const csrf = csrfMatch[1];
 
-    let cookies = mergeCookies('', page.setCookies);
+    let cookies = mergeCookies(`dpuniq=${DPUNIQ}`, page.setCookies);
 
     const boundary = '----WebKitFormBoundaryABCDEFGH12345678';
     const postBody = [
@@ -293,6 +312,9 @@ async function check() {
             'content-length': bodyBuf.length,
             'origin': `https://${HOST}`,
             'referer': TARGET,
+            'sec-ch-ua': '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
             'sec-fetch-dest': 'empty',
             'sec-fetch-mode': 'cors',
             'sec-fetch-site': 'same-origin',
@@ -308,20 +330,11 @@ async function check() {
     } catch {
         console.error(`[error] Неочікувана відповідь POST (HTTP ${post.status}):`);
         console.error(`[debug] Set-Cookie: ${JSON.stringify(post.setCookies)}`);
+        console.error(`[debug] Cookies відправлені: ${cookies}`);
         console.error(`[debug] Тіло (перші 500):\n${post.body.slice(0, 500)}`);
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        const snapPage = `./debug_get_page_${stamp}.html`;
-        const snapPost = `./debug_post_${post.status}_${stamp}.html`;
-        fs.writeFileSync(snapPage, page.body);
-        fs.writeFileSync(snapPost, post.body);
-        console.log(`[debug] Snapshot GET: ${snapPage}`);
-        console.log(`[debug] Snapshot POST: ${snapPost}`);
-        await notifyAlways(
-            `${HEADER}\n\n🔴 <b>POST повернув не-JSON (HTTP ${post.status})</b>\n\n` +
-            `Тіло відповіді: <code>${post.body.slice(0, 300).replace(/</g, '&lt;')}</code>\n\n` +
-            `GET-сторінка (токен): <code>${snapPage}</code>\n` +
-            `POST-відповідь: <code>${snapPost}</code>\n\n🔗 ${TARGET}\n\n🕐 ${now}`
-        );
+        const snapFile = saveDebugSnapshot(post.body, `post_${post.status}`);
+        saveDebugSnapshot(page.body, 'post_error_page');
+        await notifyState(STATE.POST_ERROR, now, `HTTP ${post.status}: ${post.body.slice(0, 200)}`);
         return false;
     }
 
@@ -349,17 +362,25 @@ function ts() {
     return new Date().toLocaleTimeString('ru-RU');
 }
 
+async function safeCheck() {
+    try {
+        await check();
+    } catch (e) {
+        const now = new Date().toLocaleString('uk-UA', { timeZone: 'America/Toronto' }) + ' (Toronto)';
+        console.error(`[${ts()}] [error]`, e.message);
+        await notifyAlways(
+            `${HEADER}\n\n💥 <b>Необроблена помилка</b>\n\n<code>${String(e.message).slice(0, 300)}</code>\n\n🕐 ${now}`
+        );
+    }
+}
+
 if (watchMode) {
     console.log(`[${ts()}] Моніторинг кожні ${intervalMin} хв. Ctrl+C для зупинки.`);
-    try { await check(); } catch (e) {
-        console.error(`[${ts()}] [error]`, e.message);
-    }
+    await safeCheck();
     setInterval(async () => {
         console.log(`[${ts()}] --- Запуск перевірки ---`);
-        try { await check(); } catch (e) {
-            console.error(`[${ts()}] [error]`, e.message);
-        }
+        await safeCheck();
     }, intervalMin * 60 * 1000);
 } else {
-    await check();
+    await safeCheck();
 }
