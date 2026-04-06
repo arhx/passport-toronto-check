@@ -3,3 +3,4 @@ cookies.txt
 config.mjs
 .idea/
 .claude/
+*.html
